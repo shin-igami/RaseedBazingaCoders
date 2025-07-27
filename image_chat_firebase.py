@@ -146,12 +146,12 @@ class ImageChatService:
 
     def _handle_receipt_question(self, question: str, user_id: str, session_id: str) -> dict:
         """Handles the logic for answering questions about saved receipts."""
-        receipts_query = self.db.collection("receipts").where("user_id", "==", user_id).stream()
+        receipts_query = self.db.collection("receipts").stream()
         user_receipts = [doc.to_dict() for doc in receipts_query]
         if not user_receipts:
             return {"type": "text", "content": "No receipt data found. Please upload a receipt image first."}
 
-        chat_history_query = self.db.collection("chat_history").where("user_id", "==", user_id)\
+        chat_history_query = self.db.collection("chat_history")\
             .order_by("timestamp", direction=firestore.Query.DESCENDING).limit(10).stream()
         recent_chats = [doc.to_dict() for doc in chat_history_query]
 
@@ -218,9 +218,26 @@ class ImageChatService:
     def _extract_json_from_image(self, image_data_uri: str, user_id: str) -> dict:
         """Analyzes a receipt image and extracts structured data."""
         upload_timestamp = datetime.now()
-        prompt = f"""Analyze this receipt image and extract details (userId, item, price, quantity, purchase_date, purchase_place)
-        in JSON format. If purchase_date is missing, use {upload_timestamp.strftime('%Y-%m-%d')}.
-        Return ONLY the JSON object."""
+        
+        # UPDATED: The prompt now asks for a list of items
+        prompt = f"""
+        Analyze this receipt image and extract a JSON object with the following details.
+        - The `items` field should be a list of all items found on the receipt.
+        - Each item in the list should be an object with its own `name`, `price`, and `quantity`.
+        - Also include `purchase_date` and `purchase_place` for the overall receipt.
+        - If `purchase_date` is missing, use today's date: {upload_timestamp.strftime('%Y-%m-%d')}.
+        - Return ONLY the JSON object without extra text or markdown.
+        
+        Example format:
+        {{
+        "items": [
+            {{ "name": "Milk", "price": 2.50, "quantity": 1 }},
+            {{ "name": "Bread", "price": 1.75, "quantity": 2 }}
+        ],
+        "purchase_date": "2025-07-27",
+        "purchase_place": "SuperMart"
+        }}
+        """
 
         message = HumanMessage(content=[{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_data_uri}}])
         response = self.llm.invoke([message])
@@ -228,9 +245,13 @@ class ImageChatService:
         try:
             raw_json_str = self._clean_llm_json_response(response.content)
             parsed_data = json.loads(raw_json_str)
+            
+            # Add the userId to the top-level of the parsed data
             parsed_data["userId"] = user_id
+            
             if not parsed_data.get("purchase_date"):
                 parsed_data["purchase_date"] = upload_timestamp.strftime('%Y-%m-%d')
+                
             return parsed_data
         except json.JSONDecodeError:
             return {"error": "Failed to parse content into JSON.", "raw_response": response.content}
