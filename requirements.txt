@@ -19,3 +19,24 @@ opencv-python
 numpy
 aiohttp
 firebase-admin
+# requirements.txt
+
+# For loading environment variables
+python-dotenv
+
+# For making HTTP requests to external APIs
+requests
+
+# Core LangChain and Google Vertex AI integration
+langchain
+langchain-core
+langchain-google-vertexai
+
+# Google Cloud authentication and libraries
+google-auth
+google-cloud-firestore
+firebase-admin
+
+# For creating the web server API
+Flask
+Flask-Cors

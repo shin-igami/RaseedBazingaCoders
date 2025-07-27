@@ -183,11 +183,15 @@ class ImageChatService:
 
         if intent == "PRICE_COMPARISON":
             return self._handle_price_comparison(question)
+            
         elif intent == "CREATE_PASS":
             pass_data = self.create_grocery_pass(question, user_id)
             if "error" in pass_data:
                 return {"type": "error", "content": f"Sorry, failed to create grocery pass: {pass_data['error']}"}
-            return {"type": "text", "content": f"Grocery pass created:\n{json.dumps(pass_data, indent=2)}"}
+            
+            # This now correctly returns the dictionary object
+            return {"type": "PASS_BUILDER", "content": pass_data} 
+            
         else: # GENERAL_QUESTION
             return self._handle_receipt_question(question, user_id, session_id)
 
@@ -232,18 +236,23 @@ class ImageChatService:
             return {"error": "Failed to parse content into JSON.", "raw_response": response.content}
 
     def process_and_save_image(self, image_data_uri: str, user_id: str) -> str:
-        """Processes an image, extracts data, and saves it to Firestore."""
+        """Processes an image, extracts data, and saves the entire receipt as a single document in Firestore."""
         print(f"Processing image for user: {user_id}")
         extracted_data = self._extract_json_from_image(image_data_uri, user_id)
         if "error" in extracted_data:
             raise ValueError("Failed to extract JSON data from the image.")
 
+        # Create one document for the entire receipt
         receipt_doc = {
-            "user_id": user_id, "item": extracted_data.get("item"),
-            "price": extracted_data.get("price"), "quantity": extracted_data.get("quantity"),
-            "purchase_date": extracted_data.get("purchase_date"), "purchase_place": extracted_data.get("purchase_place"),
-            "upload_timestamp": datetime.now(), "last_updated": datetime.now(),
+            "user_id": user_id,
+            "items": extracted_data.get("items", []), # Store all items as an array
+            "purchase_date": extracted_data.get("purchase_date"),
+            "purchase_place": extracted_data.get("purchase_place"),
+            "upload_timestamp": datetime.now(),
+            "last_updated": datetime.now(),
         }
+
+        # Add the single document to Firestore
         update_time, doc_ref = self.db.collection("receipts").add(receipt_doc)
         doc_id = doc_ref.id
         print(f"Saved receipt with doc ID: {doc_id}")

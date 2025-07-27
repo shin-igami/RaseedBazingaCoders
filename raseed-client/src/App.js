@@ -1,6 +1,8 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import PassBuilder from './PassBuilder';
+import './App.css'; // Import the new stylesheet
 
 const App = () => {
   const videoRef = useRef(null);
@@ -21,20 +23,18 @@ const App = () => {
   const [chatResponse, setChatResponse] = useState('');
   const [isChatting, setIsChatting] = useState(false);
 
-  // Keep track of last uploaded session to optionally link chats
   const [lastSessionId, setLastSessionId] = useState('');
 
-  // Show message popup
+  const [showPassBuilder, setShowPassBuilder] = useState(false);
+  const [passBuilderData, setPassBuilderData] = useState(null);
+
   const MessageBox = ({ message, onClose }) => {
     if (!showMessageBox) return null;
     return (
-      <div className="fixed inset-0 bg-gray-700 bg-opacity-60 flex items-center justify-center p-4 z-50">
-        <div className="bg-white p-6 rounded-xl shadow-xl max-w-sm w-full text-center">
-          <p className="text-lg font-semibold mb-4">{message}</p>
-          <button
-            onClick={onClose}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg transition"
-          >
+      <div className="message-box-overlay">
+        <div className="message-box">
+          <p className="message-box-text">{message}</p>
+          <button onClick={onClose} className="btn btn-primary">
             OK
           </button>
         </div>
@@ -52,7 +52,7 @@ const App = () => {
     setMessage('');
   };
 
-  // Firebase initialization and anonymous auth
+  // Firebase initialization and other functions remain the same...
   useEffect(() => {
     const firebaseConfig = {
       apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
@@ -93,7 +93,6 @@ const App = () => {
     }
   }, [showCustomMessage]);
 
-  // Manage camera stream lifecycle
   useEffect(() => {
     return () => {
       if (stream) {
@@ -102,7 +101,6 @@ const App = () => {
     };
   }, [stream]);
 
-  // Attach stream to video element
   useEffect(() => {
     if (isCameraActive && stream && videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -110,7 +108,6 @@ const App = () => {
     }
   }, [isCameraActive, stream]);
 
-  // Start camera
   const startCamera = useCallback(async () => {
     setIsLoading(true);
     setCapturedImage(null);
@@ -126,7 +123,6 @@ const App = () => {
     }
   }, [showCustomMessage]);
 
-  // Stop camera
   const stopCamera = useCallback(() => {
     setIsCameraActive(false);
     if (stream) {
@@ -135,7 +131,6 @@ const App = () => {
     setStream(null);
   }, [stream]);
 
-  // Capture image from camera
   const captureImage = () => {
     if (!videoRef.current || !canvasRef.current || videoRef.current.videoWidth === 0) {
       showCustomMessage("Camera not ready. Please wait a moment.");
@@ -151,7 +146,6 @@ const App = () => {
     stopCamera();
   };
 
-  // Handle image upload (camera capture or file picker) to backend
   const uploadImageToBackend = async () => {
     if (!capturedImage || !userId) {
       showCustomMessage("Cannot upload. Image or User ID missing.");
@@ -186,7 +180,6 @@ const App = () => {
     }
   };
 
-  // Handle file input change (upload photo)
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -199,13 +192,13 @@ const App = () => {
     reader.readAsDataURL(file);
   };
 
-  // Handle chat submit (ask question)
   const handleChatSubmit = async (e) => {
     e.preventDefault();
     if (!chatQuestion.trim() || !userId) {
       showCustomMessage("Please type a question and be authenticated.");
       return;
     }
+
     setIsChatting(true);
     setChatResponse('');
     const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:5001/chat';
@@ -224,7 +217,13 @@ const App = () => {
       if (!response.ok) {
         throw new Error(result.error || "Failed to get a response.");
       }
-      setChatResponse(result.content);
+      if (result.type === 'PASS_BUILDER') {
+        setPassBuilderData(result.content);
+        setShowPassBuilder(true);
+        setChatResponse('');
+      } else {
+        setChatResponse(result.content);
+      }
     } catch (error) {
       console.error("Chat Error:", error);
       setChatResponse(`Error: ${error.message}`);
@@ -234,53 +233,52 @@ const App = () => {
     }
   };
 
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 flex flex-col items-center justify-center p-6 font-sans">
-      <div className="shadow-lg rounded-2xl border border-gray-300 bg-white p-8 max-w-lg w-full">
-        <h1 className="text-4xl font-extrabold text-center text-gray-800 mb-4">📸 Receipt Manager & Chat AI</h1>
-        <p className="text-center text-gray-600 mb-8">
+    <div className="app-container">
+      <div className="content-wrapper">
+        <h1 className="main-title">📸 Receipt Manager & Chat AI</h1>
+        <p className="main-subtitle">
           Capture or upload receipt images to extract data, then ask questions about your receipts.
         </p>
 
-        <div className="relative w-full aspect-video bg-gray-900 rounded-xl overflow-hidden shadow-inner mb-6 flex items-center justify-center">
+        <div className="media-preview">
           {isLoading && (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 text-white text-xl font-semibold select-none">
+            <div className="loading-overlay">
               Processing...
             </div>
           )}
 
           {isCameraActive && !capturedImage && (
-            <video ref={videoRef} className="w-full h-full object-cover" autoPlay playsInline muted />
+            <video ref={videoRef} className="media-content" autoPlay playsInline muted />
           )}
 
           {capturedImage && (
-            <img src={capturedImage} alt="Preview" className="w-full h-full object-contain rounded-xl" />
+            <img src={capturedImage} alt="Preview" className="media-content media-image" />
           )}
 
           {!isCameraActive && !capturedImage && !isLoading && (
-            <div className="text-gray-400 p-4 text-center select-none">
-              Click <span className="font-semibold">Start Camera</span> or <span className="font-semibold">Upload Receipt</span>
+            <div className="media-placeholder">
+              Click <strong>Start Camera</strong> or <strong>Upload Receipt</strong>
             </div>
           )}
         </div>
 
-        <canvas ref={canvasRef} className="hidden" />
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-        {/* Action Buttons */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+        <div className="action-buttons">
           {!isCameraActive && !capturedImage && (
             <>
               <button
                 onClick={startCamera}
                 disabled={isLoading || !isAuthReady}
-                className="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-lg transition disabled:opacity-50"
+                className="btn btn-green"
               >
                 {isLoading ? "Starting..." : "Start Camera"}
               </button>
-              {/* File Upload */}
               <label
                 htmlFor="file-upload"
-                className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg text-center select-none transition"
+                className="btn btn-blue"
               >
                 Upload Receipt
               </label>
@@ -289,7 +287,7 @@ const App = () => {
                 type="file"
                 accept="image/*"
                 onChange={handleFileUpload}
-                className="hidden"
+                style={{ display: 'none' }}
                 disabled={isLoading || !isAuthReady}
               />
             </>
@@ -298,7 +296,7 @@ const App = () => {
             <button
               onClick={captureImage}
               disabled={isLoading}
-              className="col-span-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition disabled:opacity-50"
+              className="btn btn-indigo full-width"
             >
               Capture Image
             </button>
@@ -308,14 +306,14 @@ const App = () => {
               <button
                 onClick={uploadImageToBackend}
                 disabled={isLoading || !isAuthReady}
-                className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition disabled:opacity-50"
+                className="btn btn-purple"
               >
                 {isLoading ? "Uploading..." : "Upload & Analyze"}
               </button>
               <button
                 onClick={startCamera}
                 disabled={isLoading}
-                className="bg-red-500 hover:bg-red-600 text-white font-semibold py-3 px-6 rounded-lg transition disabled:opacity-50"
+                className="btn btn-red"
               >
                 Retake
               </button>
@@ -323,33 +321,30 @@ const App = () => {
           )}
         </div>
 
-        {/* Chat Section */}
-        <div className="border-t border-gray-300 pt-6">
-          <h2 className="text-2xl font-bold text-gray-700 mb-4 text-center">Ask a Question</h2>
-          <form onSubmit={handleChatSubmit}>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <input
-                type="text"
-                value={chatQuestion}
-                onChange={(e) => setChatQuestion(e.target.value)}
-                placeholder="Ask questions about your receipts history..."
-                disabled={isChatting || !isAuthReady}
-                className="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 transition disabled:bg-gray-100"
-                autoComplete="off"
-              />
-              <button
-                type="submit"
-                disabled={isChatting || !chatQuestion.trim() || !isAuthReady}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition disabled:opacity-50"
-              >
-                {isChatting ? "Thinking..." : "Send"}
-              </button>
-            </div>
+        <div className="chat-section">
+          <h2 className="section-title">Ask a Question</h2>
+          <form onSubmit={handleChatSubmit} className="chat-form">
+            <input
+              type="text"
+              value={chatQuestion}
+              onChange={(e) => setChatQuestion(e.target.value)}
+              placeholder="Ask questions about your receipts history..."
+              disabled={isChatting || !isAuthReady}
+              className="chat-input"
+              autoComplete="off"
+            />
+            <button
+              type="submit"
+              disabled={isChatting || !chatQuestion.trim() || !isAuthReady}
+              className="btn btn-indigo"
+            >
+              {isChatting ? "Thinking..." : "Send"}
+            </button>
           </form>
 
           {chatResponse && (
-            <div className="mt-6 p-5 bg-gray-50 border border-gray-200 rounded-xl whitespace-pre-wrap text-gray-800 shadow-inner">
-              <h3 className="font-semibold mb-2">Answer:</h3>
+            <div className="chat-response">
+              <h3>Answer:</h3>
               <p>{chatResponse}</p>
             </div>
           )}
@@ -357,6 +352,12 @@ const App = () => {
       </div>
 
       <MessageBox message={message} onClose={closeMessageBox} />
+      {showPassBuilder && passBuilderData && (
+        <PassBuilder
+          passData={passBuilderData}
+          onClose={() => setShowPassBuilder(false)}
+        />
+      )}
     </div>
   );
 };
