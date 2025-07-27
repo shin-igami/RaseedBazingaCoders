@@ -15,6 +15,9 @@ from firebase_admin import credentials, firestore
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+from google.auth.transport.requests import AuthorizedSession
+import jwt
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -24,7 +27,7 @@ class ImageChatService:
         # Get and validate environment variables first
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
         location = os.getenv("GOOGLE_CLOUD_REGION")
-
+        self.ISSUER_ID = os.getenv("GOOGLE_WALLET_ISSUER_ID")
         if not project_id or not location:
             raise ValueError("GIP_PROJECT_ID and GCP_LOCATION environment variables must be set in your .env file.")
 
@@ -35,7 +38,14 @@ class ImageChatService:
             model_name=os.getenv("MODEL_NAME", "gemini-1.5-flash-001"),
             temperature=0.7,
         )
+        self.key_file_path = os.environ.get('GOOGLE_WALLET_CREDENTIALS_PATH',
+            os.path.join(os.getcwd(), 'google-wallet-credentials.json')
+        )
+        print(f"DEBUG: Using key file path: {self.key_file_path}")
+        if not self.key_file_path or not os.path.exists(self.key_file_path):
+            raise ValueError("GOOGLE_WALLET_CREDENTIALS_PATH environment variable not set or file not found.")
         self._init_firebase()
+        self._init_google_wallet_auth() # <-- Add this line
 
     def _init_firebase(self):
         if not firebase_admin._apps:
@@ -46,6 +56,33 @@ class ImageChatService:
             firebase_admin.initialize_app(cred)
         self.db = firestore.client()
 
+    # In your ImageChatService class
+
+    def _init_google_wallet_auth(self):
+        """Initializes credentials for signing and creating Wallet passes."""
+        # Load credentials from the specific wallet JSON file
+        cred_path = self.key_file_path  # Use the path we already validated in __init__
+
+        if not cred_path or not os.path.exists(cred_path):
+            raise ValueError("GOOGLE_WALLET_CREDENTIALS_PATH env variable not set or file not found.")
+
+        # Load the service account info from JSON file
+        with open(cred_path, 'r') as f:
+            service_account_info = json.load(f)
+
+        # Create a credentials object from the service account info
+        self.google_credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=["https://www.googleapis.com/auth/wallet_object.issuer"]
+        )
+
+        # For making authorized API calls to Google Wallet API
+        self.auth_session = AuthorizedSession(self.google_credentials)
+
+        # For signing the JWT for the pass - extract from the JSON file
+        self.service_account_email = service_account_info['client_email']
+        self.private_key = service_account_info['private_key']
+        
     def _clean_llm_json_response(self, llm_response_text: str) -> str:
         # Helper to strip markdown from LLM JSON responses
         text = llm_response_text.strip()
@@ -56,6 +93,83 @@ class ImageChatService:
         if text.endswith("```"):
             text = text[:-len("```")].rstrip()
         return text
+
+    # --- NEW: Google Wallet Authentication and Helpers ---
+    def _create_pass_class(self):
+        """Creates the pass class on Google's servers if it doesn't exist."""
+        class_id = f"{self.ISSUER_ID}.project_grocery_list"
+        url = f"https://walletobjects.googleapis.com/walletobjects/v1/genericClass/{class_id}"
+        
+        try:
+            response = self.auth_session.get(url)
+            if response.status_code == 200:
+                print(f"DEBUG: Pass class '{class_id}' already exists.")
+                return True # Class already exists
+            
+            if response.status_code != 404:
+                print(f"Error checking pass class: {response.text}")
+                return False # Unexpected error
+
+            # Class not found, so create it
+            class_payload = {
+                "id": class_id,
+                "cardTitle": {"defaultValue": {"language": "en", "value": "Grocery List"}},
+                "header": {"defaultValue": {"language": "en", "value": "Your Items"}},
+                "hexBackgroundColor": "#4285f4",
+                "logo": {"sourceUri": {"uri": "https://storage.googleapis.com/wallet-lab-tools-codelab-artifacts-public/pass_google_logo.jpg"}}
+            }
+            response = self.auth_session.post("https://walletobjects.googleapis.com/walletobjects/v1/genericClass", json=class_payload)
+            response.raise_for_status()
+            print(f"DEBUG: Pass class '{class_id}' created successfully.")
+            return True
+        except Exception as e:
+            print(f"ERROR: Failed to create/verify pass class: {e}")
+            return False
+
+
+    def create_wallet_pass_jwt(self, user_email: str, pass_data: dict) -> dict:
+        """Creates the final pass object and a signed JWT for the 'Add to Wallet' button."""
+        self._create_pass_class() # Ensure class exists before creating an object
+        
+        class_id = f"{self.ISSUER_ID}.project_grocery_list"
+        object_id_suffix = f"{user_email.replace('@', '_at_')}-{int(datetime.now().timestamp())}"
+        object_id = f"{self.ISSUER_ID}.{object_id_suffix}"
+
+        # Create text modules from the grocery list items
+        print(f"DEBUG: Creating pass for user: {user_email} with object ID: {object_id} pass_data: {pass_data}  ")
+        text_modules = []
+        for i, item in enumerate(pass_data.get('items', [])):
+            name = item.get('name', 'Unknown Item')
+            quantity = item.get('quantity', 1)
+            text_modules.append({
+                "id": f"item_{i}",
+                "header": name,
+                "body": f"Quantity: {quantity}"
+            })
+
+        pass_object = {
+            "id": object_id,
+            "classId": class_id,
+            "genericType": "GENERIC_TYPE_UNSPECIFIED",
+            "hexBackgroundColor": "#fbbc04",
+            "cardTitle": {"defaultValue": {"language": "en", "value": "Your Grocery List"}},
+            "header": {"defaultValue": {"language": "en", "value": user_email}},
+            "barcode": {"type": "QR_CODE", "value": object_id},
+            "textModulesData": text_modules
+        }
+
+        claims = {
+            "iss": self.service_account_email,
+            "aud": "google",
+            "typ": "savetowallet",
+            "origins": ["http://localhost:3000", "http://localhost:3001"], # IMPORTANT: Add your frontend's URL here
+            "payload": {"genericObjects": [pass_object]},
+        }
+
+        token = jwt.encode(claims, self.private_key, algorithm="RS256")
+        save_url = f"https://pay.google.com/gp/v/save/{token}"
+        
+        return {"saveUrl": save_url}
 
     # --- Price Comparison and Location Tools ---
 
@@ -83,7 +197,7 @@ class ImageChatService:
             return {"error": "Price search unavailable - missing API credentials", "available": False}
         
         location = self._get_user_location()
-        search_query = f"{query} price in {location['city']} {location['country']}"
+        search_query = f"{query} best prices in {location['city']} {location['country']}, more emphasis on online availability and country"
 
         try:
             url = "https://www.googleapis.com/customsearch/v1"
@@ -151,7 +265,7 @@ class ImageChatService:
         if not user_receipts:
             return {"type": "text", "content": "No receipt data found. Please upload a receipt image first."}
 
-        chat_history_query = self.db.collection("chat_history")\
+        chat_history_query = self.db.collection("chat_history").where("user_id", "==", user_id)\
             .order_by("timestamp", direction=firestore.Query.DESCENDING).limit(10).stream()
         recent_chats = [doc.to_dict() for doc in chat_history_query]
 
@@ -255,7 +369,6 @@ class ImageChatService:
             return parsed_data
         except json.JSONDecodeError:
             return {"error": "Failed to parse content into JSON.", "raw_response": response.content}
-
     def process_and_save_image(self, image_data_uri: str, user_id: str) -> str:
         """Processes an image, extracts data, and saves the entire receipt as a single document in Firestore."""
         print(f"Processing image for user: {user_id}")
@@ -279,6 +392,16 @@ class ImageChatService:
         print(f"Saved receipt with doc ID: {doc_id}")
         return doc_id
 
+    def create_grocery_pass(self, grocery_list: str, user_id: str) -> dict:
+        prompt = f"""Format the user's grocery list into a JSON object with a 'user_id' and a list of 'items', each with 'name' and optional 'quantity'. User request: \"\"\"{grocery_list}\"\"\" Return ONLY the JSON object."""
+        message = HumanMessage(content=prompt)
+        response = self.llm.invoke([message])
+        raw_json_str = self._clean_llm_json_response(response.content)
+        try:
+            pass_data = json.loads(raw_json_str)
+            pass_data['user_id'] = user_id
+            return pass_data
+        except json.JSONDecodeError: return {"error": "Failed to parse grocery pass from LLM response.", "raw_response": response.content}
 
 # --- Flask App Setup ---
 
@@ -296,6 +419,22 @@ def process_image_endpoint():
         return jsonify({"message": "Image processed successfully", "docId": doc_id}), 201
     except Exception as e:
         print(f"Error in /process-image: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/create-wallet-pass", methods=["POST"])
+def create_wallet_pass_endpoint():
+    data = request.get_json() # Use get_json() to parse the request
+    if not data or "email" not in data or "passData" not in data:
+        return jsonify({"error": "Missing 'email' or 'passData' in request"}), 400
+
+    try:
+        email = data["email"]
+        pass_data = data["passData"] # This will now be a dictionary
+        
+        result = image_chat_service.create_wallet_pass_jwt(email, pass_data)
+        return jsonify(result), 200
+    except Exception as e:
+        print(f"Error in /create-wallet-pass: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/chat", methods=["POST"])
